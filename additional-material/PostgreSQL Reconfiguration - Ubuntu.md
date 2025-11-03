@@ -74,6 +74,7 @@ host    all             all             ::1/128                 scram-sha-256
 **Change to:**
 ```
 # "local" is for Unix domain socket connections only
+host    all             postgres        0.0.0.0/0               md5
 local   all             postgres                                md5
 local   all             all                                     peer
 # IPv4 local connections:

@@ -7,7 +7,7 @@ sudo systemctl status postgresql
 
 # Find your PostgreSQL version
 ls /etc/postgresql/
-# Example output: 14, 15, or 16
+# Example output: 14, 15, or 18
 ```
 
 ---
@@ -35,8 +35,8 @@ sudo -u postgres psql
 
 **Edit postgresql.conf:**
 ```bash
-# Find config file (replace 16 with your version)
-sudo nano /etc/postgresql/16/main/postgresql.conf
+# Find config file (replace 18 with your version)
+sudo nano /etc/postgresql/18/main/postgresql.conf
 ```
 
 **Find and modify:**
@@ -58,7 +58,7 @@ port = 15432
 
 **Edit pg_hba.conf:**
 ```bash
-sudo nano /etc/postgresql/16/main/pg_hba.conf
+sudo nano /etc/postgresql/18/main/pg_hba.conf
 ```
 
 **Find this section (near bottom):**
@@ -181,7 +181,7 @@ ALTER USER postgres WITH PASSWORD 'password';
 \q
 
 # Verify pg_hba.conf has md5, not peer
-sudo grep "local.*postgres" /etc/postgresql/16/main/pg_hba.conf
+sudo grep "local.*postgres" /etc/postgresql/18/main/pg_hba.conf
 ```
 
 **Issue: Connection refused**
@@ -196,8 +196,8 @@ sudo journalctl -u postgresql -n 50
 **Reset to defaults:**
 ```bash
 # Restore original configs
-sudo cp /etc/postgresql/16/main/postgresql.conf.bak /etc/postgresql/16/main/postgresql.conf
-sudo cp /etc/postgresql/16/main/pg_hba.conf.bak /etc/postgresql/16/main/pg_hba.conf
+sudo cp /etc/postgresql/18/main/postgresql.conf.bak /etc/postgresql/18/main/postgresql.conf
+sudo cp /etc/postgresql/18/main/pg_hba.conf.bak /etc/postgresql/18/main/pg_hba.conf
 sudo systemctl restart postgresql
 ```
 
@@ -212,8 +212,8 @@ PGPASSWORD=password psql -U postgres -h 127.0.0.1 -p 15432  # Inline password
 sudo -u postgres psql -p 15432                      # Socket (no password)
 
 # Config files:
-/etc/postgresql/16/main/postgresql.conf             # Port settings
-/etc/postgresql/16/main/pg_hba.conf                 # Authentication
+/etc/postgresql/18/main/postgresql.conf             # Port settings
+/etc/postgresql/18/main/pg_hba.conf                 # Authentication
 
 # Service management:
 sudo systemctl restart postgresql

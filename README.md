@@ -1,1 +1,1 @@
-# postgres-admin-2025-nov-03
+# postgres admin training 2025-nov-03

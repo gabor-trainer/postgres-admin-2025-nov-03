@@ -14,6 +14,12 @@ grant all privileges on database northwind to northwind;
 
 \c northwind
 
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+REVOKE ALL ON DATABASE northwind FROM PUBLIC;
+GRANT USAGE ON SCHEMA public TO northwind;
+GRANT CREATE ON SCHEMA public TO northwind;
+
+
 SET search_path TO public;
 -- Switch to northwind role with login privileges
 SET SESSION AUTHORIZATION northwind;

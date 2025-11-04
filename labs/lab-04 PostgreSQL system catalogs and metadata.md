@@ -3,7 +3,7 @@
 **Estimated time:** 45 minutes  
 **Difficulty level:** Beginner  
 **PostgreSQL version:** 18.x  
-**Platform requirements:** Windows only
+**Platform requirements:** Any
 
 ---
 

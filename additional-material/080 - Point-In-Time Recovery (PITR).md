@@ -18,15 +18,35 @@ You need to know about the following to complete this chapter:
 - How to perform physical backups using pg_basebackup
 - Understanding of Write-Ahead Logs (WALs) and their role in PostgreSQL
 - Familiarity with PostgreSQL configuration files (postgresql.conf)
-- Basic Linux/Unix command-line operations
+- Basic command-line operations (Windows Command Prompt/PowerShell or Linux/Unix shell)
 - Understanding of filesystem operations and permissions
 
 The chapter examples assume you have:
 
-- PostgreSQL 18 installed and running
+- PostgreSQL 18 installed and running on Windows and/or Linux
 - Sufficient disk space for WAL archives (at least 10-20 GB recommended for testing)
 - Access to the PostgreSQL data directory (PGDATA)
 - Appropriate permissions to stop and start PostgreSQL services
+
+**Platform notes:**
+- Windows examples use paths like `C:\archive\` and commands like `copy`
+- Linux examples use paths like `/mnt/archive/` and commands like `cp`
+- Both platforms are covered throughout this chapter
+
+**Quick reference: Platform differences**
+
+| Feature           | Linux                         | Windows                                    |
+| ----------------- | ----------------------------- | ------------------------------------------ |
+| Path separator    | `/`                           | `\` (escaped as `\\` in config)            |
+| Archive directory | `/mnt/archive`                | `C:\archive`                               |
+| Copy command      | `cp`                          | `copy`                                     |
+| Existence check   | `test ! -f`                   | `IF NOT EXIST`                             |
+| Permissions       | `chmod 700` / `chown`         | `icacls`                                   |
+| Service control   | `systemctl` / `pg_ctl`        | `net start/stop` / Services GUI            |
+| Log location      | `/var/log/postgresql/`        | `C:\Program Files\PostgreSQL\18\data\log\` |
+| View logs         | `tail -f` / `journalctl`      | PowerShell `Get-Content -Wait`             |
+| Compression       | `gzip`                        | `7-Zip` / PowerShell                       |
+| PGDATA default    | `/var/lib/postgresql/18/main` | `C:\Program Files\PostgreSQL\18\data`      |
 
 ## Understanding PITR concepts and architecture
 
@@ -38,6 +58,11 @@ PITR builds upon PostgreSQL's Write-Ahead Logging mechanism. As you learned in *
 
 Under normal circumstances, PostgreSQL generates WAL segments, uses them for crash recovery, and then recycles them once the data they protect has been safely written to disk. However, for PITR, we need to preserve these WAL segments continuously. By archiving every WAL segment as it's created, we maintain a complete history of all database changes from the moment we took a base backup.
 
+The PITR process can be visualized as follows:
+
+![PITR Architecture](media/pitr_architecture.jpg)
+
+*Figure: PITR Architecture - Base Backup + Continuous WAL Archive*
 
 The combination of a base backup (taken at time T0) and the continuous stream of archived WAL files allows us to reconstruct the database state at any point from T0 onwards, up to the last available WAL file.
 
@@ -151,23 +176,43 @@ In PostgreSQL 18, archive_mode can also be set to always, which forces archiving
 
 #### archive_command
 
-The archive_command is executed for each WAL segment that needs to be archived. This is where you specify how and where WAL files should be copied:
+The archive_command is executed for each WAL segment that needs to be archived. This is where you specify how and where WAL files should be copied.
+
+**Placeholders used in archive_command:**
+- `%p`: Placeholder for the full path of the WAL file to archive
+- `%f`: Placeholder for the WAL filename only
+
+The archive_command must return zero exit status on success. If it returns non-zero, PostgreSQL will retry the archiving later.
+
+**Important**: The archive_command must ensure that files are not overwritten.
+
+**Linux example:**
 
 ```ini
 archive_command = 'test ! -f /mnt/archive/%f && cp %p /mnt/archive/%f'
 ```
 
-Let's break down this command:
-
-- `%p`: Placeholder for the full path of the WAL file to archive
-- `%f`: Placeholder for the WAL filename only
+Breaking down the Linux command:
 - `test ! -f /mnt/archive/%f`: Checks that the file doesn't already exist in the archive
 - `&&`: Only execute the copy if the test succeeds
 - `cp %p /mnt/archive/%f`: Copies the WAL file to the archive location
 
-The archive_command must return zero exit status on success. If it returns non-zero, PostgreSQL will retry the archiving later.
+**Windows example:**
 
-**Important**: The archive_command must ensure that files are not overwritten. The test condition in the example above prevents this.
+```ini
+archive_command = 'IF NOT EXIST "C:\\archive\\%f" copy "%p" "C:\\archive\\%f"'
+```
+
+Breaking down the Windows command:
+- `IF NOT EXIST "C:\\archive\\%f"`: Checks that the file doesn't already exist in the archive
+- `copy "%p" "C:\\archive\\%f"`: Copies the WAL file to the archive location
+- Note: Backslashes must be escaped in postgresql.conf (use `\\` instead of `\`)
+
+**Alternative Windows example using PowerShell:**
+
+```ini
+archive_command = 'powershell -Command "if (!(Test-Path C:\\archive\\%f)) { Copy-Item ''%p'' ''C:\\archive\\%f'' }"'
+```
 
 #### Additional configuration for production
 
@@ -194,6 +239,8 @@ The archive_timeout parameter is particularly important. Without it, a low-activ
 
 Before enabling archiving, prepare your archive directory:
 
+**Linux:**
+
 ```bash
 # Create the archive directory
 sudo mkdir -p /mnt/archive
@@ -214,38 +261,96 @@ Example output:
 drwx------ 2 postgres postgres 4096 Nov  4 10:30 /mnt/archive
 ```
 
+**Windows:**
+
+```cmd
+REM Create the archive directory
+mkdir C:\archive
+
+REM Set permissions (using icacls)
+icacls C:\archive /inheritance:r
+icacls C:\archive /grant:r "NT AUTHORITY\NetworkService:(OI)(CI)F"
+icacls C:\archive /remove:g Users
+
+REM Verify setup
+icacls C:\archive
+```
+
+Example output:
+
+```
+C:\archive NT AUTHORITY\NetworkService:(OI)(CI)F
+```
+
+**Note for Windows:** If PostgreSQL runs as a different service account, replace `NT AUTHORITY\NetworkService` with the appropriate account name. You can check the service account in Services (services.msc) under the PostgreSQL service properties.
+
 ### Advanced archive command examples
 
 Here are more sophisticated archive_command examples for different scenarios:
 
-**Archiving to a remote server via SSH:**
+**Archiving to a remote server:**
 
+Linux (via SSH):
 ```ini
 archive_command = 'rsync -a %p postgres@backup-server:/archive/%f'
 ```
 
+Windows (to network share):
+```ini
+archive_command = 'copy "%p" "\\\\backup-server\\archive\\%f"'
+```
+
 **Archiving with compression:**
 
+Linux:
 ```ini
 archive_command = 'gzip < %p > /mnt/archive/%f.gz'
 ```
 
+Windows (using 7-Zip, if installed):
+```ini
+archive_command = '"C:\\Program Files\\7-Zip\\7z.exe" a -tgzip "C:\\archive\\%f.gz" "%p" > nul'
+```
+
+Windows (using PowerShell):
+```ini
+archive_command = 'powershell -Command "Compress-Archive -Path ''%p'' -DestinationPath ''C:\\archive\\%f.zip''"'
+```
+
 **Archiving to AWS S3:**
 
+Linux:
 ```ini
 archive_command = 'aws s3 cp %p s3://my-backup-bucket/wal-archive/%f'
 ```
 
+Windows:
+```ini
+archive_command = 'aws s3 cp "%p" s3://my-backup-bucket/wal-archive/%f'
+```
+
 **Archiving with multiple destinations (redundancy):**
 
+Linux:
 ```ini
 archive_command = 'test ! -f /mnt/archive/%f && cp %p /mnt/archive/%f && rsync -a %p backup-server:/archive/%f'
 ```
 
+Windows:
+```ini
+archive_command = 'IF NOT EXIST "C:\\archive\\%f" (copy "%p" "C:\\archive\\%f" && copy "%p" "\\\\backup-server\\archive\\%f")'
+```
+
 **Using pgBackRest (recommended for production):**
 
+Linux:
 ```ini
 archive_command = 'pgbackrest --stanza=main archive-push %p'
+```
+
+Windows:
+```ini
+archive_command = 'pgbackrest --stanza=main archive-push "%p"'
 ```
 
 ### Configuring archive cleanup
@@ -253,6 +358,8 @@ archive_command = 'pgbackrest --stanza=main archive-push %p'
 Over time, your archive will grow continuously. You need a strategy to clean up old WAL files that are no longer needed. However, be careful: deleting WAL files that are still needed will make PITR impossible for certain time ranges.
 
 A safe approach is to keep WAL files for a specific retention period, for example, 30 days:
+
+**Linux cleanup script:**
 
 ```bash
 # Create a cleanup script
@@ -278,6 +385,40 @@ Schedule this script with cron:
 # Run cleanup daily at 2 AM
 crontab -e
 0 2 * * * /usr/local/bin/cleanup-archive.sh >> /var/log/archive-cleanup.log 2>&1
+```
+
+**Windows cleanup script:**
+
+```powershell
+# Create a cleanup script (save as C:\Scripts\cleanup-archive.ps1)
+$archiveDir = "C:\archive"
+$retentionDays = 30
+$cutoffDate = (Get-Date).AddDays(-$retentionDays)
+
+# Find and delete WAL files older than retention period
+Get-ChildItem -Path $archiveDir -File |
+    Where-Object { $_.Name -notlike "*.history" -and $_.LastWriteTime -lt $cutoffDate } |
+    Remove-Item -Force
+
+# Log the cleanup
+$logMessage = "$(Get-Date): Cleaned up archive files older than $retentionDays days"
+Add-Content -Path "C:\Logs\archive-cleanup.log" -Value $logMessage
+```
+
+Schedule this script with Task Scheduler:
+
+```cmd
+REM Create a scheduled task to run daily at 2 AM
+schtasks /create /tn "PostgreSQL Archive Cleanup" /tr "powershell.exe -ExecutionPolicy Bypass -File C:\Scripts\cleanup-archive.ps1" /sc daily /st 02:00 /ru SYSTEM
+```
+
+Or use PowerShell to create the scheduled task:
+
+```powershell
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-ExecutionPolicy Bypass -File C:\Scripts\cleanup-archive.ps1'
+$trigger = New-ScheduledTaskTrigger -Daily -At 2am
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName "PostgreSQL Archive Cleanup" -Action $action -Trigger $trigger -Principal $principal
 ```
 
 **Important**: If you're using this archive for multiple backup purposes (like maintaining replicas), ensure your cleanup policy accounts for the needs of all consumers.
@@ -318,8 +459,19 @@ SELECT pg_switch_wal();
 
 4. Check if the file was archived:
 
+**Linux:**
 ```bash
 ls -lh /mnt/archive/
+```
+
+**Windows:**
+```cmd
+dir C:\archive\
+```
+
+Or using PowerShell:
+```powershell
+Get-ChildItem C:\archive\ | Format-Table Name, Length, LastWriteTime
 ```
 
 You should see at least one WAL file (16 MB each by default).
@@ -345,6 +497,28 @@ Example output:
 ```
 
 If failed_count is increasing, check the PostgreSQL log file for error messages related to the archive_command.
+
+**Checking PostgreSQL logs:**
+
+Linux:
+```bash
+tail -f /var/log/postgresql/postgresql-18-main.log
+# or
+journalctl -u postgresql -f
+```
+
+Windows:
+```cmd
+REM Using PowerShell to tail the log
+powershell -Command "Get-Content 'C:\Program Files\PostgreSQL\18\data\log\postgresql-*.log' -Wait -Tail 50"
+```
+
+Or check Windows Event Viewer:
+```cmd
+eventvwr.msc
+REM Navigate to: Windows Logs > Application
+REM Filter for Source: postgresql
+```
 
 ### Testing archive recovery
 
@@ -381,6 +555,8 @@ Now that WAL archiving is configured and tested, let's explore how to actually p
 
 A base backup is the starting point for PITR. You need a physical backup taken while the database is running and archiving is active. The most straightforward way to take a base backup is using pg_basebackup:
 
+**Linux:**
+
 ```bash
 # Create a directory for the backup
 mkdir -p /mnt/backups/base
@@ -388,6 +564,27 @@ mkdir -p /mnt/backups/base
 # Take the base backup
 pg_basebackup -h localhost -U postgres -D /mnt/backups/base/$(date +%Y%m%d-%H%M%S) \
               -Ft -z -P -X stream
+```
+
+**Windows:**
+
+```cmd
+REM Create a directory for the backup
+mkdir C:\backups\base
+
+REM Take the base backup (using Command Prompt date/time format)
+pg_basebackup -h localhost -U postgres -D "C:\backups\base\%date:~-4,4%%date:~-10,2%%date:~-7,2%-%time:~0,2%%time:~3,2%%time:~6,2%" -Ft -z -P -X stream
+```
+
+Or using PowerShell (cleaner date format):
+
+```powershell
+# Create a directory for the backup
+New-Item -ItemType Directory -Force -Path C:\backups\base
+
+# Take the base backup
+$timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+pg_basebackup -h localhost -U postgres -D "C:\backups\base\$timestamp" -Ft -z -P -X stream
 ```
 
 Let's break down these options:
@@ -406,8 +603,14 @@ Example output:
 
 After completion, you'll have tar files in your backup directory:
 
+**Linux:**
 ```bash
 ls -lh /mnt/backups/base/20251104-103000/
+```
+
+**Windows:**
+```cmd
+dir C:\backups\base\20251104-103000\
 ```
 
 Output:
@@ -441,28 +644,51 @@ Let's walk through a complete PITR scenario. Assume you need to recover to a spe
 
 First, stop the running database:
 
+**Linux:**
 ```bash
+# Using pg_ctl
 pg_ctl -D /var/lib/postgresql/18/main stop -m fast
-```
 
-Or using systemd:
-
-```bash
+# Or using systemd
 sudo systemctl stop postgresql
 ```
+
+**Windows:**
+```cmd
+REM Stop the service using net stop
+net stop postgresql-x64-18
+
+REM Or using PowerShell
+Stop-Service postgresql-x64-18
+```
+
+Or use Windows Services GUI (services.msc).
 
 **Step 2: Backup the current PGDATA (optional but recommended)**
 
 Before restoring, it's wise to preserve the current state:
 
+**Linux:**
 ```bash
 sudo mv /var/lib/postgresql/18/main /var/lib/postgresql/18/main.old
+```
+
+**Windows:**
+```cmd
+REM Rename the data directory
+move "C:\Program Files\PostgreSQL\18\data" "C:\Program Files\PostgreSQL\18\data.old"
+```
+
+Or using PowerShell:
+```powershell
+Move-Item "C:\Program Files\PostgreSQL\18\data" "C:\Program Files\PostgreSQL\18\data.old"
 ```
 
 **Step 3: Restore the base backup**
 
 Extract the base backup to the PGDATA directory:
 
+**Linux:**
 ```bash
 # Create new PGDATA directory
 sudo mkdir -p /var/lib/postgresql/18/main
@@ -476,10 +702,35 @@ sudo -u postgres tar -xzf /mnt/backups/base/20251104-103000/pg_wal.tar.gz \
      -C /var/lib/postgresql/18/main/pg_wal
 ```
 
+**Windows (Command Prompt):**
+```cmd
+REM Create new data directory
+mkdir "C:\Program Files\PostgreSQL\18\data"
+
+REM Extract base backup using tar (included with Windows 10+)
+cd "C:\Program Files\PostgreSQL\18\data"
+tar -xzf "C:\backups\base\20251104-103000\base.tar.gz"
+
+REM Extract WAL
+cd pg_wal
+tar -xzf "C:\backups\base\20251104-103000\pg_wal.tar.gz"
+```
+
+**Windows (PowerShell with 7-Zip):**
+```powershell
+# Create new data directory
+New-Item -ItemType Directory -Force -Path "C:\Program Files\PostgreSQL\18\data"
+
+# Extract using 7-Zip
+& "C:\Program Files\7-Zip\7z.exe" x "C:\backups\base\20251104-103000\base.tar.gz" -o"C:\Program Files\PostgreSQL\18\data\"
+& "C:\Program Files\7-Zip\7z.exe" x "C:\backups\base\20251104-103000\pg_wal.tar.gz" -o"C:\Program Files\PostgreSQL\18\data\pg_wal\"
+```
+
 **Step 4: Configure recovery parameters**
 
-In PostgreSQL 18, recovery configuration is done through postgresql.conf or by creating a recovery.signal file with recovery parameters. Create or edit postgresql.conf:
+In PostgreSQL 18, recovery configuration is done through postgresql.conf or by creating a recovery.signal file with recovery parameters.
 
+**Linux:**
 ```bash
 sudo -u postgres cat >> /var/lib/postgresql/18/main/postgresql.conf << EOF
 
@@ -490,26 +741,95 @@ recovery_target_action = 'promote'
 EOF
 ```
 
+**Windows (Command Prompt):**
+```cmd
+REM Append to postgresql.conf
+echo. >> "C:\Program Files\PostgreSQL\18\data\postgresql.conf"
+echo # Recovery configuration for PITR >> "C:\Program Files\PostgreSQL\18\data\postgresql.conf"
+echo restore_command = 'copy "C:\\archive\\%%f" "%%p"' >> "C:\Program Files\PostgreSQL\18\data\postgresql.conf"
+echo recovery_target_time = '2025-11-04 14:30:00' >> "C:\Program Files\PostgreSQL\18\data\postgresql.conf"
+echo recovery_target_action = 'promote' >> "C:\Program Files\PostgreSQL\18\data\postgresql.conf"
+```
+
+**Windows (PowerShell - cleaner approach):**
+```powershell
+$configFile = "C:\Program Files\PostgreSQL\18\data\postgresql.conf"
+@"
+
+# Recovery configuration for PITR
+restore_command = 'copy "C:\\archive\\%f" "%p"'
+recovery_target_time = '2025-11-04 14:30:00'
+recovery_target_action = 'promote'
+"@ | Add-Content -Path $configFile
+```
+
 Create the recovery.signal file to tell PostgreSQL to enter recovery mode:
 
+**Linux:**
 ```bash
 sudo -u postgres touch /var/lib/postgresql/18/main/recovery.signal
+```
+
+**Windows:**
+```cmd
+REM Create empty recovery.signal file
+type nul > "C:\Program Files\PostgreSQL\18\data\recovery.signal"
+```
+
+Or using PowerShell:
+```powershell
+New-Item -ItemType File -Path "C:\Program Files\PostgreSQL\18\data\recovery.signal" -Force
 ```
 
 **Step 5: Start PostgreSQL in recovery mode**
 
 Start the database:
 
+**Linux:**
 ```bash
+# Using systemd
 sudo systemctl start postgresql
+
+# Or using pg_ctl
+pg_ctl -D /var/lib/postgresql/18/main start
+```
+
+**Windows:**
+```cmd
+REM Start the service
+net start postgresql-x64-18
+
+REM Or using PowerShell
+Start-Service postgresql-x64-18
 ```
 
 **Step 6: Monitor the recovery process**
 
 Watch the PostgreSQL log file to monitor recovery progress:
 
+**Linux:**
 ```bash
 tail -f /var/log/postgresql/postgresql-18-main.log
+
+# Or using journalctl
+journalctl -u postgresql -f
+```
+
+**Windows (Command Prompt):**
+```cmd
+REM Find the latest log file and display it
+powershell -Command "Get-Content 'C:\Program Files\PostgreSQL\18\data\log\postgresql-*.log' -Wait -Tail 50"
+```
+
+**Windows (PowerShell):**
+```powershell
+# Get the most recent log file
+$logFile = Get-ChildItem "C:\Program Files\PostgreSQL\18\data\log\postgresql-*.log" | 
+           Sort-Object LastWriteTime -Descending | 
+           Select-Object -First 1
+
+# Tail the log
+Get-Content $logFile.FullName -Wait -Tail 50
 ```
 
 You'll see messages like:
@@ -982,6 +1302,7 @@ Regular verification ensures your backups and archives are usable when needed:
 
 **Verify individual WAL files:**
 
+**Linux:**
 ```bash
 # Check WAL file integrity
 pg_waldump /mnt/archive/000000010000000000000001 > /dev/null
@@ -990,12 +1311,27 @@ pg_waldump /mnt/archive/000000010000000000000001 > /dev/null
 # If corrupted, you'll see error messages
 ```
 
+**Windows:**
+```cmd
+REM Check WAL file integrity
+pg_waldump "C:\archive\000000010000000000000001" > nul
+
+REM If successful, no output
+REM If corrupted, you'll see error messages
+```
+
 **Verify base backup:**
 
 PostgreSQL 18 includes pg_verifybackup:
 
+**Linux:**
 ```bash
 pg_verifybackup /mnt/backups/base/20251104-103000
+```
+
+**Windows:**
+```cmd
+pg_verifybackup "C:\backups\base\20251104-103000"
 ```
 
 Example output:
@@ -1007,6 +1343,8 @@ pg_verifybackup: backup successfully verified
 **Automated backup testing:**
 
 Create a script that regularly tests PITR:
+
+**Linux test script:**
 
 ```bash
 #!/bin/bash
@@ -1056,11 +1394,74 @@ rm -rf "$TEST_DIR"
 exit $RESULT
 ```
 
-Schedule this script weekly:
+Make it executable and schedule:
 
 ```bash
-# Add to crontab
+chmod +x /usr/local/bin/test-pitr.sh
+
+# Add to crontab - run weekly on Sundays at 2 AM
 0 2 * * 0 /usr/local/bin/test-pitr.sh
+```
+
+**Windows test script (PowerShell):**
+
+```powershell
+# test-pitr.ps1
+
+$backupDir = "C:\backups\base\latest"
+$archiveDir = "C:\archive"
+$testDir = "C:\temp\pitr-test-$(Get-Date -Format 'yyyyMMddHHmmss')"
+$logFile = "C:\Logs\pitr-test.log"
+
+Add-Content -Path $logFile -Value "$(Get-Date): Starting PITR test"
+
+# Create test directory
+New-Item -ItemType Directory -Force -Path $testDir | Out-Null
+
+# Restore base backup
+tar -xzf "$backupDir\base.tar.gz" -C $testDir
+
+# Configure recovery
+$config = @"
+port = 5444
+restore_command = 'copy "$archiveDir\%f" "%p"'
+recovery_target = 'immediate'
+recovery_target_action = 'shutdown'
+"@
+Add-Content -Path "$testDir\postgresql.conf" -Value $config
+
+New-Item -ItemType File -Path "$testDir\recovery.signal" | Out-Null
+
+# Start PostgreSQL for recovery
+& pg_ctl -D $testDir -l "$testDir\logfile.txt" start
+
+# Wait for recovery to complete
+Start-Sleep -Seconds 30
+
+# Check if recovery was successful
+$logContent = Get-Content "$testDir\logfile.txt" -Raw
+if ($logContent -match "database system is shut down") {
+    Add-Content -Path $logFile -Value "$(Get-Date): PITR test PASSED"
+    $result = 0
+} else {
+    Add-Content -Path $logFile -Value "$(Get-Date): PITR test FAILED"
+    $result = 1
+}
+
+# Cleanup
+Remove-Item -Recurse -Force $testDir
+
+exit $result
+```
+
+Schedule with Task Scheduler:
+
+```powershell
+# Create scheduled task to run weekly on Sundays at 2 AM
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-ExecutionPolicy Bypass -File C:\Scripts\test-pitr.ps1'
+$trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 2am
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName "PostgreSQL PITR Test" -Action $action -Trigger $trigger -Principal $principal
 ```
 
 ### Common issues and solutions
@@ -1083,47 +1484,96 @@ FROM pg_stat_archiver;
 
 Check PostgreSQL log:
 
+**Linux:**
 ```bash
 grep "archive command failed" /var/log/postgresql/postgresql-18-main.log
+```
+
+**Windows:**
+```powershell
+Select-String -Path "C:\Program Files\PostgreSQL\18\data\log\postgresql-*.log" -Pattern "archive command failed"
 ```
 
 Common causes and solutions:
 
 1. **Insufficient disk space on archive destination:**
 
+**Linux:**
 ```bash
 df -h /mnt/archive
+```
+
+**Windows:**
+```powershell
+Get-PSDrive C | Select-Object Used,Free
+# Or
+Get-Volume | Where-Object {$_.DriveLetter -eq 'C'}
 ```
 
 Solution: Free up space or expand storage
 
 2. **Permission issues:**
 
+**Linux:**
 ```bash
 sudo -u postgres test -w /mnt/archive && echo "Writable" || echo "Not writable"
 ```
 
+**Windows:**
+```powershell
+# Test write permissions
+$testFile = "C:\archive\test_write_$(Get-Date -Format 'yyyyMMddHHmmss').tmp"
+try {
+    [System.IO.File]::WriteAllText($testFile, "test")
+    Remove-Item $testFile
+    Write-Host "Writable"
+} catch {
+    Write-Host "Not writable: $_"
+}
+```
+
 Solution: Fix permissions:
 
+**Linux:**
 ```bash
 sudo chown -R postgres:postgres /mnt/archive
 sudo chmod 700 /mnt/archive
+```
+
+**Windows:**
+```cmd
+REM Grant full control to the PostgreSQL service account
+icacls C:\archive /grant "NT AUTHORITY\NetworkService:(OI)(CI)F"
 ```
 
 3. **Archive command syntax error:**
 
 Test the command manually:
 
+**Linux:**
 ```bash
 sudo -u postgres /bin/sh -c 'cp /var/lib/postgresql/18/main/pg_wal/000000010000000000000001 /mnt/archive/test_archive'
+```
+
+**Windows:**
+```cmd
+REM Test as the service account (may need to run as that user)
+copy "C:\Program Files\PostgreSQL\18\data\pg_wal\000000010000000000000001" "C:\archive\test_archive"
 ```
 
 4. **Network issues (for remote archiving):**
 
 Test connectivity:
 
+**Linux:**
 ```bash
 sudo -u postgres ssh backup-server echo "Connection OK"
+```
+
+**Windows:**
+```powershell
+# Test network share access
+Test-Path "\\backup-server\archive"
 ```
 
 **Issue 2: WAL files not found during recovery**
@@ -1134,12 +1584,22 @@ Symptoms:
 
 Diagnosis:
 
+**Linux:**
 ```bash
 # Check which WAL file is needed
 grep "could not open file" /var/log/postgresql/postgresql-18-main.log
 
 # Verify it exists in archive
 ls -l /mnt/archive/000000010000000000000005
+```
+
+**Windows:**
+```powershell
+# Check which WAL file is needed
+Select-String -Path "C:\Program Files\PostgreSQL\18\data\log\postgresql-*.log" -Pattern "could not open file"
+
+# Verify it exists in archive
+Get-Item "C:\archive\000000010000000000000005"
 ```
 
 Solutions:
@@ -1154,17 +1614,34 @@ This is serious. You cannot perform PITR past this point. Options:
 
 Test restore command manually:
 
+**Linux:**
 ```bash
 # Simulate what PostgreSQL does
 sudo -u postgres sh -c 'cp /mnt/archive/000000010000000000000005 /tmp/test_restore'
 ```
 
+**Windows:**
+```cmd
+REM Simulate the restore
+copy "C:\archive\000000010000000000000005" "C:\temp\test_restore"
+```
+
 3. **Compressed archives without decompression in restore_command:**
 
-If archives are gzipped:
+If archives are gzipped, update restore_command:
 
+**Linux:**
 ```ini
 restore_command = 'gunzip < /mnt/archive/%f.gz > %p'
+```
+
+**Windows:**
+```ini
+# Using 7-Zip
+restore_command = '"C:\\Program Files\\7-Zip\\7z.exe" x -so "C:\\archive\\%f.gz" > "%p"'
+
+# Or using PowerShell
+restore_command = 'powershell -Command "Expand-Archive -Path ''C:\\archive\\%f.zip'' -DestinationPath (Split-Path ''%p'') -Force; Move-Item ''%p.extracted'' ''%p''"'
 ```
 
 **Issue 3: Recovery taking too long**
@@ -1212,9 +1689,28 @@ wal_sync_method = fdatasync
 
 4. **Hardware limitations:**
 
-- Check I/O wait times: `iostat -x 5`
-- Monitor disk queue depth
-- Consider faster storage if recovery time is critical
+Check I/O performance:
+
+**Linux:**
+```bash
+# Monitor I/O wait times
+iostat -x 5
+
+# Check disk queue depth
+iotop -o
+```
+
+**Windows:**
+```powershell
+# Monitor disk performance
+Get-Counter '\PhysicalDisk(*)\% Disk Time' -Continuous
+
+# Or use Performance Monitor
+perfmon
+# Add counters: PhysicalDisk -> % Disk Time, Avg. Disk Queue Length
+```
+
+Consider faster storage if recovery time is critical
 
 **Issue 4: Recovery stops at wrong point**
 
@@ -1226,14 +1722,26 @@ Diagnosis:
 
 Check recovery settings:
 
+**Linux:**
 ```bash
 grep -E "recovery_target" /var/lib/postgresql/18/main/postgresql.conf
 ```
 
+**Windows:**
+```powershell
+Select-String -Path "C:\Program Files\PostgreSQL\18\data\postgresql.conf" -Pattern "recovery_target"
+```
+
 Check what recovery actually stopped at:
 
+**Linux:**
 ```bash
 grep "recovery stopping" /var/log/postgresql/postgresql-18-main.log
+```
+
+**Windows:**
+```powershell
+Select-String -Path "C:\Program Files\PostgreSQL\18\data\log\postgresql-*.log" -Pattern "recovery stopping"
 ```
 
 Solutions:
@@ -1264,8 +1772,14 @@ recovery_target_inclusive = false
 
 Verify you're recovering on the correct timeline:
 
+**Linux:**
 ```bash
 ls -l /var/lib/postgresql/18/main/pg_wal/*.history
+```
+
+**Windows:**
+```cmd
+dir "C:\Program Files\PostgreSQL\18\data\pg_wal\*.history"
 ```
 
 **Issue 5: Archive disk space filling up**
@@ -1276,12 +1790,26 @@ Symptoms:
 
 Diagnosis:
 
+**Linux:**
 ```bash
 # Check archive size
 du -sh /mnt/archive
 
 # Check growth rate
 du -sh /mnt/archive && sleep 3600 && du -sh /mnt/archive
+```
+
+**Windows:**
+```powershell
+# Check archive size
+Get-ChildItem -Path C:\archive -Recurse | Measure-Object -Property Length -Sum | 
+    Select-Object @{Name="Size(GB)";Expression={[math]::Round($_.Sum/1GB,2)}}
+
+# Or simpler
+"{0:N2} GB" -f ((Get-ChildItem C:\archive -Recurse | Measure-Object -Property Length -Sum).Sum / 1GB)
+
+# Check available disk space
+Get-Volume | Where-Object {$_.DriveLetter -eq 'C'}
 ```
 
 Solutions:
@@ -1303,9 +1831,17 @@ max_wal_size = 4GB
 
 3. **Compress archives:**
 
+**Linux:**
 ```ini
 archive_command = 'gzip < %p > /mnt/archive/%f.gz'
 restore_command = 'gunzip < /mnt/archive/%f.gz > %p'
+```
+
+**Windows:**
+```ini
+# Using 7-Zip
+archive_command = '"C:\\Program Files\\7-Zip\\7z.exe" a -tgzip "C:\\archive\\%f.gz" "%p" > nul'
+restore_command = '"C:\\Program Files\\7-Zip\\7z.exe" x -so "C:\\archive\\%f.gz" > "%p"'
 ```
 
 4. **Use external backup tools:**
@@ -1447,19 +1983,34 @@ archive_command = 'cp %p /mnt/local-archive/%f && \
 
 Encrypt archived WAL files:
 
+**Linux (using OpenSSL):**
 ```ini
 # Encrypt during archiving
-archive_command = 'gzip < %p | \
-                   openssl enc -aes-256-cbc -salt -pass pass:$ENCRYPTION_KEY > \
-                   /mnt/archive/%f.gz.enc'
+archive_command = 'openssl enc -aes-256-cbc -salt -pbkdf2 -in %p -out /mnt/archive/%f.enc -pass pass:$ENCRYPTION_KEY'
 
 # Decrypt during recovery
-restore_command = 'openssl enc -d -aes-256-cbc -pass pass:$ENCRYPTION_KEY \
-                   -in /mnt/archive/%f.gz.enc | gunzip > %p'
+restore_command = 'openssl enc -d -aes-256-cbc -pbkdf2 -in /mnt/archive/%f.enc -out %p -pass pass:$ENCRYPTION_KEY'
+```
+
+**Windows (using certutil or OpenSSL):**
+
+If you have OpenSSL for Windows installed:
+```ini
+# Encrypt during archiving
+archive_command = 'openssl enc -aes-256-cbc -salt -pbkdf2 -in "%p" -out "C:\\archive\\%f.enc" -pass pass:%ENCRYPTION_KEY%'
+
+# Decrypt during recovery
+restore_command = 'openssl enc -d -aes-256-cbc -pbkdf2 -in "C:\\archive\\%f.enc" -out "%p" -pass pass:%ENCRYPTION_KEY%'
+```
+
+Using PowerShell and .NET encryption:
+```ini
+archive_command = 'powershell -Command "$key=[System.Text.Encoding]::UTF8.GetBytes(''YourEncryptionKey''); $aes=[System.Security.Cryptography.Aes]::Create(); $aes.Key=$key; $encryptor=$aes.CreateEncryptor(); $fs=[System.IO.File]::OpenRead(''%p''); $cs=New-Object System.Security.Cryptography.CryptoStream([System.IO.File]::OpenWrite(''C:\\archive\\%f.enc''),$encryptor,[System.Security.Cryptography.CryptoStreamMode]::Write); $fs.CopyTo($cs); $cs.Close(); $fs.Close()"'
 ```
 
 Better approach: Use key management systems:
 
+**Linux (using AWS KMS):**
 ```bash
 # Using AWS KMS
 archive_command = 'aws kms encrypt \
@@ -1470,17 +2021,37 @@ archive_command = 'aws kms encrypt \
                    base64 -d > /mnt/archive/%f.enc'
 ```
 
+**Windows (using AWS KMS):**
+```ini
+archive_command = 'powershell -Command "aws kms encrypt --key-id alias/wal-archive-key --plaintext fileb://\"%p\" --output text --query CiphertextBlob | ForEach-Object { [Convert]::FromBase64String($_) | Set-Content -Path ''C:\\archive\\%f.enc'' -Encoding Byte }"'
+```
+
 **Encryption in transit:**
 
 When archiving to remote locations:
-- Use SSH/SCP for encrypted transfer
+
+**Linux:**
+- Use SSH/SCP for encrypted transfer:
+  ```ini
+  archive_command = 'scp %p backup-server:/archive/%f'
+  ```
 - Implement VPNs for site-to-site archiving
 - Use HTTPS for cloud storage uploads
+
+**Windows:**
+- Use secure network shares with SMB3 encryption:
+  ```ini
+  archive_command = 'copy "%p" "\\\\backup-server\\archive\\%f"'
+  ```
+  (Ensure SMB3 encryption is enabled on the share)
+- Use HTTPS for cloud storage uploads
+- Implement VPNs for site-to-site archiving
 
 **Access control:**
 
 Restrict access to archives:
 
+**Linux:**
 ```bash
 # Archive directory permissions
 chmod 700 /mnt/archive
@@ -1488,12 +2059,64 @@ chown postgres:postgres /mnt/archive
 
 # Regular audit of access
 sudo ausearch -f /mnt/archive -ts recent
+
+# Or using auditctl to set up monitoring
+sudo auditctl -w /mnt/archive -p rwxa -k archive_access
+```
+
+**Windows:**
+```cmd
+REM Archive directory permissions - restrict to service account only
+icacls C:\archive /inheritance:r
+icacls C:\archive /grant:r "NT AUTHORITY\NetworkService:(OI)(CI)F"
+icacls C:\archive /remove:g Users
+icacls C:\archive /remove:g "Authenticated Users"
+
+REM Regular audit of access - enable auditing
+auditpol /set /category:"Object Access" /success:enable /failure:enable
+
+REM Set auditing on the archive folder
+icacls C:\archive /audit:enable
+icacls C:\archive /audit "Everyone:(OI)(CI)W"
+```
+
+**Windows (PowerShell - more detailed):**
+```powershell
+# Set strict permissions on archive directory
+$path = "C:\archive"
+$acl = Get-Acl $path
+$acl.SetAccessRuleProtection($true, $false)  # Disable inheritance
+$acl.Access | ForEach-Object { $acl.RemoveAccessRule($_) }  # Remove all existing rules
+
+# Add access only for PostgreSQL service account
+$serviceAccount = "NT AUTHORITY\NetworkService"
+$rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+    $serviceAccount,
+    "FullControl",
+    "ContainerInherit,ObjectInherit",
+    "None",
+    "Allow"
+)
+$acl.AddAccessRule($rule)
+Set-Acl $path $acl
+
+# Enable auditing
+$audit = New-Object System.Security.AccessControl.FileSystemAuditRule(
+    "Everyone",
+    "Write,Delete,DeleteSubdirectoriesAndFiles",
+    "ContainerInherit,ObjectInherit",
+    "None",
+    "Success,Failure"
+)
+$acl.AddAuditRule($audit)
+Set-Acl $path $acl
 ```
 
 **Backup verification:**
 
 Implement checksums or signatures:
 
+**Linux:**
 ```ini
 # Generate SHA256 checksum during archive
 archive_command = 'cp %p /mnt/archive/%f && \
@@ -1502,6 +2125,24 @@ archive_command = 'cp %p /mnt/archive/%f && \
 # Verify during restore
 restore_command = 'sha256sum -c /mnt/archive/%f.sha256 && \
                    cp /mnt/archive/%f %p'
+```
+
+**Windows:**
+```ini
+# Generate SHA256 checksum during archive (using PowerShell)
+archive_command = 'copy "%p" "C:\\archive\\%f" && powershell -Command "$hash = Get-FileHash -Algorithm SHA256 ''C:\\archive\\%f''; $hash.Hash + ''  '' + $hash.Path | Out-File ''C:\\archive\\%f.sha256''"'
+
+# Verify during restore (using PowerShell)
+restore_command = 'powershell -Command "$expected = (Get-Content ''C:\\archive\\%f.sha256'').Split()[0]; $actual = (Get-FileHash -Algorithm SHA256 ''C:\\archive\\%f'').Hash; if ($expected -eq $actual) { copy ''C:\\archive\\%f'' ''%p'' } else { exit 1 }"'
+```
+
+Or using certutil (built into Windows):
+```ini
+# Generate checksum during archive
+archive_command = 'copy "%p" "C:\\archive\\%f" && certutil -hashfile "C:\\archive\\%f" SHA256 > "C:\\archive\\%f.sha256"'
+
+# Verify during restore
+restore_command = 'certutil -hashfile "C:\\archive\\%f" SHA256 | findstr /v ":" > "C:\\temp\\current_hash.txt" && findstr /v ":" "C:\\archive\\%f.sha256" > "C:\\temp\\expected_hash.txt" && fc "C:\\temp\\current_hash.txt" "C:\\temp\\expected_hash.txt" > nul && copy "C:\\archive\\%f" "%p"'
 ```
 
 ### Performance optimization
@@ -1556,8 +2197,8 @@ While PostgreSQL provides the foundation for PITR, production environments often
 
 pgBackRest is a popular choice for production PITR:
 
+**Linux configuration (/etc/pgbackrest.conf):**
 ```ini
-# pgBackRest configuration (/etc/pgbackrest.conf)
 [global]
 repo1-path=/var/lib/pgbackrest
 repo1-retention-full=4
@@ -1565,6 +2206,18 @@ repo1-retention-full=4
 [pg1]
 pg1-path=/var/lib/postgresql/18/main
 ```
+
+**Windows configuration (C:\Program Files\pgBackRest\pgbackrest.conf):**
+```ini
+[global]
+repo1-path=C:/pgbackrest
+repo1-retention-full=4
+
+[pg1]
+pg1-path=C:/Program Files/PostgreSQL/18/data
+```
+
+**Note for Windows:** Use forward slashes (/) in pgBackRest config files, not backslashes.
 
 pgBackRest handles:
 - Compression and parallel backup
@@ -1576,8 +2229,11 @@ pgBackRest handles:
 
 **Barman:**
 
-Barman (Backup and Recovery Manager) is another excellent tool:
+Barman (Backup and Recovery Manager) is another excellent tool for Linux environments:
 
+**Note:** Barman is primarily designed for Linux/Unix systems. For Windows PostgreSQL instances, you can run Barman on a separate Linux server and connect to your Windows PostgreSQL instance remotely.
+
+**Linux configuration:**
 ```ini
 # Barman configuration
 [pg1]
@@ -1588,10 +2244,22 @@ backup_method = postgres
 archiver = on
 ```
 
+**For Windows PostgreSQL instances managed by Linux Barman:**
+```ini
+[pg1-windows]
+description = "Windows PostgreSQL 18"
+conninfo = host=windows-pg-server port=5432 user=barman dbname=postgres
+backup_method = postgres
+archiver = on
+streaming_archiver = on
+slot_name = barman
+```
+
 **Wal-G:**
 
-Wal-G focuses on cloud-native environments:
+Wal-G focuses on cloud-native environments and works on both Linux and Windows:
 
+**Linux configuration (using environment variables):**
 ```bash
 # Configure for AWS S3
 export AWS_ACCESS_KEY_ID=your-key
@@ -1603,6 +2271,31 @@ archive_command = 'wal-g wal-push %p'
 
 # Restore command
 restore_command = 'wal-g wal-fetch %f %p'
+```
+
+**Windows configuration:**
+
+Set environment variables (System Properties > Environment Variables):
+```
+AWS_ACCESS_KEY_ID=your-key
+AWS_SECRET_ACCESS_KEY=your-secret
+WALG_S3_PREFIX=s3://your-bucket/wal-archive
+```
+
+Or set via PowerShell (temporary):
+```powershell
+$env:AWS_ACCESS_KEY_ID="your-key"
+$env:AWS_SECRET_ACCESS_KEY="your-secret"
+$env:WALG_S3_PREFIX="s3://your-bucket/wal-archive"
+```
+
+**PostgreSQL configuration (both platforms):**
+```ini
+# Archive command
+archive_command = 'wal-g wal-push "%p"'
+
+# Restore command
+restore_command = 'wal-g wal-fetch "%f" "%p"'
 ```
 
 ### Monitoring and alerting
